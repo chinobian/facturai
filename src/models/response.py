@@ -17,6 +17,14 @@ class ExtractionResponse(BaseModel):
     error: str | None = None
 
 
+class Base64ExtractionRequest(BaseModel):
+    """Request para extracción via base64 (ideal para Power Automate)."""
+
+    filename: str
+    content_type: str
+    data: str  # base64 encoded
+
+
 class BatchItemResult(BaseModel):
     """Resultado de una factura individual dentro de un batch."""
 

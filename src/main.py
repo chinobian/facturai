@@ -15,6 +15,7 @@ from src.config import Settings
 from src.extraction.claude_extractor import ClaudeExtractor
 from src.models.invoice import InvoiceData
 from src.models.response import (
+    Base64ExtractionRequest,
     BatchItemResult,
     BatchResponse,
     BatchSummary,
@@ -169,6 +170,63 @@ async def extract_invoice(
     # Extraer datos
     try:
         response = extractor.extract(file_bytes, file.content_type)
+        stats_collector.record_extraction(success=True, processing_time_ms=response.processing_time_ms)
+        return response
+    except ValueError as e:
+        stats_collector.record_extraction(success=False, processing_time_ms=0)
+        raise HTTPException(status_code=422, detail=str(e))
+    except anthropic.RateLimitError:
+        stats_collector.record_extraction(success=False, processing_time_ms=0)
+        raise HTTPException(status_code=429, detail="Rate limit de Claude API alcanzado. Intentá de nuevo en unos segundos.")
+    except anthropic.APITimeoutError:
+        stats_collector.record_extraction(success=False, processing_time_ms=0)
+        raise HTTPException(status_code=504, detail="Timeout al procesar la factura con Claude")
+    except anthropic.APIError as e:
+        stats_collector.record_extraction(success=False, processing_time_ms=0)
+        logger.error("Error de API de Claude: %s", e)
+        raise HTTPException(status_code=502, detail="Error al comunicarse con Claude API")
+
+
+@app.post("/extract/base64", response_model=ExtractionResponse)
+async def extract_invoice_base64(
+    request: Base64ExtractionRequest,
+    _api_key: str | None = Depends(verify_api_key),
+    _rate_limit: None = Depends(check_rate_limit),
+) -> ExtractionResponse:
+    """Extrae datos de una factura enviada como base64 (ideal para Power Automate)."""
+    import base64
+
+    # Validar content type
+    if request.content_type not in ALLOWED_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Tipo de archivo no soportado: {request.content_type}. "
+            f"Soportados: {', '.join(sorted(ALLOWED_CONTENT_TYPES))}",
+        )
+
+    # Decodificar base64
+    try:
+        file_bytes = base64.b64decode(request.data)
+    except Exception:
+        raise HTTPException(status_code=400, detail="El campo 'data' no es base64 válido")
+
+    # Validar tamaño
+    max_bytes = settings.max_file_size_mb * 1024 * 1024
+    if len(file_bytes) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Archivo demasiado grande ({len(file_bytes)} bytes). "
+            f"Máximo: {settings.max_file_size_mb} MB",
+        )
+
+    logger.info(
+        "Request base64 recibido | archivo=%s | content_type=%s | tamaño=%d bytes",
+        request.filename, request.content_type, len(file_bytes),
+    )
+
+    # Extraer datos
+    try:
+        response = extractor.extract(file_bytes, request.content_type)
         stats_collector.record_extraction(success=True, processing_time_ms=response.processing_time_ms)
         return response
     except ValueError as e:
